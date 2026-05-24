@@ -1,0 +1,34 @@
+/* SPECTO2 Workshop Styles */
+
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap');
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 300;
+}
+
+h1, h2, h3 {
+  font-family: 'DM Serif Display', serif;
+  font-weight: 400;
+}
+
+.callout {
+  border-radius: 8px;
+  font-size: 0.93rem;
+}
+
+code {
+  font-size: 0.88em;
+}
+
+.back-link {
+  display: inline-block;
+  font-size: 0.85rem;
+  color: #5a6070;
+  text-decoration: none;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid #e0e0d8;
+  padding-bottom: 2px;
+}
+
+.back-link:hover { color: #1a1a2e; border-color: #1a1a2e; }

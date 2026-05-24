@@ -1,0 +1,574 @@
+---
+title: "Workshop 1: Mapping Philippine Cities"
+subtitle: "Land Rent Gradients and Urban Productivity in Metro Manila"
+author: "Jem Marie Nario"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    code-fold: true
+    code-tools: true
+    code-copy: true
+    highlight-style: github
+    fig-width: 8
+    fig-height: 5
+    fig-dpi: 150
+    embed-resources: true
+    smooth-scroll: true
+    css: styles.css
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+## Overview
+
+This workshop introduces **spatial data analysis in R** using real
+Philippine Statistical Authority (PSA) data. By the end of this session,
+you will be able to:
+
+1.  Load and inspect a city-level spatial dataset for Metro Manila (NCR)
+2.  Join tabular data to shapefiles using `sf`
+3.  Produce choropleth maps with `ggplot2`
+4.  Visualize the **land rent gradient** — how rent declines with
+    distance from the central business district (CBD)
+5.  Map **human capital indicators** as proxies for urban productivity
+
+::: callout-note
+**Data sources**\
+- **FIES 2023** (Family Income and Expenditure Survey) — PSA\
+- **CPH 2020** (Census of Population and Housing, Form 2) — PSA\
+- Both datasets are aggregated to the city/municipality level (n = 17
+NCR LGUs)
+:::
+
+------------------------------------------------------------------------
+
+## 1 · Setup
+
+### 1.1 Install and load packages
+
+```{r}
+#| label: setup
+
+# Install if needed (run once)
+# install.packages(c("sf", "ggplot2", "dplyr", "ggrepel",
+#                    "scales", "viridis", "patchwork", "geodata"))
+
+library(tidyverse)
+library(sf)          # spatial data structures
+library(geodata)     # get spatial data polygons
+library(ggplot2)     # grammar of graphics
+library(ggrepel)     # non-overlapping labels
+library(dplyr)       # data wrangling
+library(scales)      # axis formatting
+library(viridis)     # colour scales
+library(patchwork)   # combine plots
+```
+
+### 1.2 Load the training dataset
+
+```{r}
+#| label: load-data
+
+# Load the pre-assembled NCR city dataset
+# Contains FIES 2023 + CPH 2020 variables at city level
+load("data/ncr_city_training.RData")   # loads as 'ncr_city'
+
+# Quick look
+glimpse(ncr_city)
+```
+
+### 1.3 Variable reference
+
+| Variable             | Source    | Description                                 |
+|------------------------|------------------------|------------------------|
+| `city`               | —         | City/municipality name                      |
+| `lat`, `lon`         | —         | City centroid (WGS84)                       |
+| `dist_cbd_km`        | —         | Distance from Makati CBD (km)               |
+| `mean_rentval`       | FIES 2023 | Mean rent value PHP/year (actual + imputed) |
+| `mean_actrent`       | FIES 2023 | Mean actual rent paid by renters            |
+| `mean_inc`           | FIES 2023 | Mean total household income PHP/year        |
+| `rent_inc_ratio`     | FIES 2023 | Rent-to-income ratio                        |
+| `wage_inc_share`     | FIES 2023 | Wage share of total income                  |
+| `mean_educ_exp`      | FIES 2023 | Mean education expenditure PHP/year         |
+| `pct_renters_fies`   | FIES 2023 | \% households paying actual rent            |
+| `n_hh`               | CPH 2020  | Total housing units                         |
+| `pct_renter`         | CPH 2020  | \% renting house and lot (H1=4)             |
+| `pct_any_rent`       | CPH 2020  | \% with any rent burden                     |
+| `pct_makeshift_wall` | CPH 2020  | \% with makeshift outer walls               |
+| `pct_strong_wall`    | CPH 2020  | \% with concrete/brick walls                |
+| `pct_college_grad`   | CPH 2020  | \% adults 25+ with college degree           |
+| `pct_some_college`   | CPH 2020  | \% adults 25+ with any college              |
+| `pct_literate`       | CPH 2020  | \% literate population                      |
+| `pct_ofw`            | CPH 2020  | \% overseas workers                         |
+
+------------------------------------------------------------------------
+
+## 2 · Introduction to Spatial Data
+
+### 2.1 What is spatial data?
+
+Spatial data attaches **location** to observations. In urban and
+regional economics, this means we can ask not just *what* a city's rent
+level is, but *where* it sits relative to other cities, economic
+centres, and infrastructure.
+
+The key R package for spatial data is `sf` (simple features). It stores
+geographic data as a standard data frame with an extra **geometry
+column**.
+
+### 2.2 Get the NCR shapefile
+
+We use the GADM administrative boundaries (level 2 = city/municipality):
+
+```{r}
+#| label: get-shapefile
+
+ph_adm2    <- gadm(country = "PHL", level = 2, path = "data/")
+ph_adm2_sf <- st_as_sf(ph_adm2)
+
+ncr_sf <- ph_adm2_sf %>%
+  filter(NAME_1 == "Metropolitan Manila") %>%
+  mutate(city = case_when(
+    NAME_2 == "Las Piñas"     ~ "Las Pinas",
+    NAME_2 == "Parañaque"     ~ "Paranaque",
+    NAME_2 == "Kalookan City" ~ "Caloocan",
+    NAME_2 == "Makati City"   ~ "Makati",
+    NAME_2 == "Pasay City"    ~ "Pasay",
+    NAME_2 == "Pasig City"    ~ "Pasig",
+    TRUE                      ~ NAME_2
+  ))
+
+cat("NCR cities in shapefile:", nrow(ncr_sf), "\n")
+```
+
+### 2.3 Join tabular data to shapefile
+
+```{r}
+#| label: join-data
+
+ncr_map <- ncr_sf %>%
+  left_join(ncr_city, by = "city")
+
+cat("Unmatched:", sum(is.na(ncr_map$mean_rentval)), "\n")
+
+# City centroids for all label layers
+ncr_centroids <- ncr_map %>%
+  st_centroid() %>%
+  mutate(
+    lon = st_coordinates(.)[, 1],
+    lat = st_coordinates(.)[, 2]
+  )
+
+plot(st_geometry(ncr_map), main = "NCR Cities — Geometry Check")
+```
+
+::: callout-tip
+**Key concept: the join key**\
+The `left_join(by = "city")` links rows in the shapefile to rows in our
+dataset using the city name as the common key. In production, it is
+better to use a numeric code (PSGC) to avoid string-matching errors —
+but city names work fine for our 17-unit NCR dataset.
+:::
+
+------------------------------------------------------------------------
+
+## 3 · Choropleth Maps
+
+A **choropleth map** shades geographic units by a variable's value. We
+use `ggplot2` for publication-quality static maps.
+
+### 3.1 Mean rent value
+
+```{r}
+#| label: mean rent
+#| fig-cap: "Mean household rent value (PHP/year) by NCR city, FIES 2023"
+
+ggplot(ncr_map) +
+  geom_sf(aes(fill = mean_rentval), color = "white", linewidth = 0.8) +
+  geom_text_repel(
+    data          = ncr_centroids,
+    aes(x = lon, y = lat, label = city),
+    size          = 3,
+    color         = "grey20",
+    max.overlaps  = 20,
+    segment.size  = 0.3,
+    segment.color = "grey60"
+  ) +
+  scale_fill_distiller(
+    palette   = "YlOrRd",
+    direction = 1,
+    labels    = comma_format(prefix = "₱"),
+    name      = "Mean Rent\n(PHP/year)"
+  ) +
+  labs(
+    title   = "Land Rent Value — NCR Cities",
+    caption = "Source: FIES 2023 (PSA)"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    plot.title      = element_text(face = "bold", hjust = 0.5,
+                                   margin = margin(b = 8)),
+    plot.caption    = element_text(color = "grey50", size = 8),
+    legend.position = "right"
+  )
+```
+
+### 3.2 College graduation rate
+
+```{r}
+#| label: map-college
+#| fig-cap: "Share of adults 25+ with college degree (%), CPH 2020"
+
+ggplot(ncr_map) +
+  geom_sf(aes(fill = pct_college_grad), color = "white", linewidth = 0.8) +
+  geom_text_repel(
+    data = ncr_centroids,
+    aes(x = lon, y = lat, label = city),
+    size = 3, color = "grey20",
+    max.overlaps = 20,
+    segment.size = 0.3, segment.color = "grey60"
+  ) +
+  scale_fill_distiller(
+    palette = "Blues", direction = 1,
+    labels  = function(x) paste0(round(x, 1), "%"),
+    name    = "College Grads\n(% adults 25+)"
+  ) +
+  labs(
+    title   = "Human Capital — College Graduation Rate",
+    caption = "Source: CPH 2020 (PSA)"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    plot.title      = element_text(face = "bold", hjust = 0.5,
+                                   margin = margin(b = 8)),
+    plot.caption    = element_text(color = "grey50", size = 8),
+    legend.position = "right"
+  )
+```
+
+### 3.3 Side-by-side comparison
+
+```{r}
+#| label: map-side-by-side
+#| fig-cap: "Rent value vs college graduation rate — NCR cities"
+#| fig-width: 10
+#| fig-height: 5
+
+p_rent <- ggplot(ncr_map) +
+  geom_sf(aes(fill = mean_rentval), color = "white", linewidth = 0.8) +
+  geom_text_repel(
+    data = ncr_centroids,
+    aes(x = lon, y = lat, label = city),
+    size = 2.5, color = "grey20", max.overlaps = 20,
+    segment.size = 0.3, segment.color = "grey60"
+  ) +
+  scale_fill_distiller(palette = "YlOrRd", direction = 1,
+                       labels = comma_format(prefix = "₱"),
+                       name = "Rent (PHP/yr)") +
+  labs(title = "Land Rent", caption = "FIES 2023") +
+  theme_void(base_size = 10) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+p_college <- ggplot(ncr_map) +
+  geom_sf(aes(fill = pct_college_grad), color = "white", linewidth = 0.8) +
+  geom_text_repel(
+    data = ncr_centroids,
+    aes(x = lon, y = lat, label = city),
+    size = 2.5, color = "grey20", max.overlaps = 20,
+    segment.size = 0.3, segment.color = "grey60"
+  ) +
+  scale_fill_distiller(palette = "Blues", direction = 1,
+                       labels = function(x) paste0(round(x, 1), "%"),
+                       name = "College (%)") +
+  labs(title = "Human Capital", caption = "CPH 2020") +
+  theme_void(base_size = 10) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+p_rent + p_college
+```
+
+::: callout-note
+**What do you notice?**\
+The two maps should show a broadly similar spatial pattern — cities with
+higher rent tend to have higher college graduation rates. This is the
+**agglomeration premium**: skilled workers cluster where productivity
+(and land rent) is highest.
+:::
+
+------------------------------------------------------------------------
+
+## 4 · The Land Rent Gradient
+
+The **Alonso–Muth–Mills (AMM) model** predicts that land rent declines
+with distance from the CBD as households trade off commuting costs
+against housing costs. Let's test this with our NCR data.
+
+### 4.1 Scatter plot: rent vs distance
+
+```{r}
+#| label: rent-gradient
+#| fig-cap: "Land rent gradient — NCR cities, 2023"
+
+ggplot(ncr_city, aes(x = dist_cbd_km, y = mean_rentval)) +
+  geom_smooth(method = "lm", se = TRUE,
+              colour = "#c0392b", fill = "#fadbd8", linewidth = 1) +
+  geom_point(aes(size = n_hh), colour = "#2c3e50", alpha = 0.8) +
+  geom_text_repel(aes(label = city), size = 3.2, colour = "grey30",
+                  max.overlaps = 20) +
+  scale_y_continuous(labels = comma_format(prefix = "₱")) +
+  scale_x_continuous(breaks = seq(0, 20, 5)) +
+  scale_size_continuous(labels = comma, name = "Housing units") +
+  labs(
+    title    = "Land Rent Gradient — Metro Manila",
+    subtitle = "Mean household rent value vs distance from Makati CBD",
+    x        = "Distance from Makati CBD (km)",
+    y        = "Mean rent value (PHP/year)",
+    caption  = "Sources: FIES 2023, CPH 2020 (PSA)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+### 4.2 Fit the gradient model
+
+```{r}
+#| label: gradient-model
+
+# Simple log-linear rent gradient model
+# ln(rent) = α + β × distance + ε
+# β < 0 confirms the AMM prediction
+
+model <- lm(log(mean_rentval) ~ dist_cbd_km, data = ncr_city)
+summary(model)
+```
+
+::: callout-important
+**Interpreting β**\
+The coefficient on `dist_cbd_km` tells us: for each additional kilometre
+from Makati CBD, rent changes by approximately `exp(β) - 1` × 100
+percent. A negative β confirms the AMM gradient.
+:::
+
+### 4.3 Rent-to-income ratio gradient
+
+```{r}
+#| label: rent-burden-gradient
+#| fig-cap: "Rent burden (rent-to-income ratio) vs distance from CBD"
+
+ggplot(ncr_city, aes(x = dist_cbd_km, y = rent_inc_ratio)) +
+  geom_smooth(method = "lm", se = TRUE,
+              colour = "#8e44ad", fill = "#e8daef", linewidth = 1) +
+  geom_point(colour = "#2c3e50", size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = city), size = 3.2, colour = "grey30",
+                  max.overlaps = 20) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_x_continuous(breaks = seq(0, 20, 5)) +
+  labs(
+    title    = "Rent Burden Gradient — Metro Manila",
+    subtitle = "Rent-to-income ratio vs distance from Makati CBD",
+    x        = "Distance from Makati CBD (km)",
+    y        = "Rent-to-income ratio",
+    caption  = "Source: FIES 2023 (PSA)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+------------------------------------------------------------------------
+
+## 5 · Human Capital and Urban Productivity
+
+### 5.1 College graduation vs rent
+
+The **human capital theory of cities** (Glaeser et al.) argues that
+skilled workers are more productive in dense, high-rent areas because of
+knowledge spillovers and thick labour markets.
+
+```{r}
+#| label: hk-rent
+#| fig-cap: "College graduation rate vs mean rent value — NCR cities"
+
+ggplot(ncr_city, aes(x = pct_college_grad, y = mean_rentval)) +
+  geom_smooth(method = "lm", se = TRUE,
+              colour = "#16a085", fill = "#d1f2eb", linewidth = 1) +
+  geom_point(aes(size = n_hh), colour = "#2c3e50", alpha = 0.8) +
+  geom_text_repel(aes(label = city), size = 3.2, colour = "grey30",
+                  max.overlaps = 20) +
+  scale_y_continuous(labels = comma_format(prefix = "₱")) +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  scale_size_continuous(labels = comma, name = "Housing units") +
+  labs(
+    title    = "Human Capital and Land Rent — Metro Manila",
+    subtitle = "Cities with more college graduates command higher rents",
+    x        = "College graduation rate (% adults 25+)",
+    y        = "Mean rent value (PHP/year)",
+    caption  = "Sources: FIES 2023, CPH 2020 (PSA)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+### 5.2 Education expenditure vs income
+
+```{r}
+#| label: educ-exp
+#| fig-cap: "Education expenditure vs household income — NCR cities"
+
+ggplot(ncr_city, aes(x = mean_inc, y = mean_educ_exp)) +
+  geom_smooth(method = "lm", se = TRUE,
+              colour = "#e67e22", fill = "#fdebd0", linewidth = 1) +
+  geom_point(colour = "#2c3e50", size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = city), size = 3.2, colour = "grey30",
+                  max.overlaps = 20) +
+  scale_x_continuous(labels = comma_format(prefix = "₱")) +
+  scale_y_continuous(labels = comma_format(prefix = "₱")) +
+  labs(
+    title    = "Education Investment vs Income — Metro Manila",
+    subtitle = "Higher-income cities invest more in education",
+    x        = "Mean household income (PHP/year)",
+    y        = "Mean education expenditure (PHP/year)",
+    caption  = "Source: FIES 2023 (PSA)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+### 5.3 Four-panel productivity dashboard
+
+```{r}
+#| label: dashboard
+#| fig-cap: "Urban productivity indicators — NCR cities"
+#| fig-height: 9
+#| fig-width: 10
+
+p1 <- ggplot(ncr_city, aes(dist_cbd_km, mean_rentval)) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#c0392b",
+              fill = "#fadbd8", linewidth = 0.8) +
+  geom_point(colour = "#2c3e50", size = 2.5) +
+  geom_text_repel(aes(label = city), size = 2.8, max.overlaps = 15) +
+  scale_y_continuous(labels = comma_format(prefix = "₱")) +
+  labs(title = "A. Rent Gradient",
+       x = "Distance from CBD (km)", y = "Mean rent (PHP/yr)") +
+  theme_minimal(base_size = 10) +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank())
+
+p2 <- ggplot(ncr_city, aes(dist_cbd_km, pct_college_grad)) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#2980b9",
+              fill = "#d6eaf8", linewidth = 0.8) +
+  geom_point(colour = "#2c3e50", size = 2.5) +
+  geom_text_repel(aes(label = city), size = 2.8, max.overlaps = 15) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(title = "B. Human Capital Gradient",
+       x = "Distance from CBD (km)", y = "College grads (%)") +
+  theme_minimal(base_size = 10) +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank())
+
+p3 <- ggplot(ncr_city, aes(pct_college_grad, mean_rentval)) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#16a085",
+              fill = "#d1f2eb", linewidth = 0.8) +
+  geom_point(colour = "#2c3e50", size = 2.5) +
+  geom_text_repel(aes(label = city), size = 2.8, max.overlaps = 15) +
+  scale_y_continuous(labels = comma_format(prefix = "₱")) +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  labs(title = "C. Rent vs Human Capital",
+       x = "College grads (%)", y = "Mean rent (PHP/yr)") +
+  theme_minimal(base_size = 10) +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank())
+
+p4 <- ggplot(ncr_city, aes(wage_inc_share, mean_inc)) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#8e44ad",
+              fill = "#e8daef", linewidth = 0.8) +
+  geom_point(colour = "#2c3e50", size = 2.5) +
+  geom_text_repel(aes(label = city), size = 2.8, max.overlaps = 15) +
+  scale_y_continuous(labels = comma_format(prefix = "₱")) +
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  labs(title = "D. Wage Formality vs Income",
+       x = "Wage share of income", y = "Mean income (PHP/yr)") +
+  theme_minimal(base_size = 10) +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank())
+
+(p1 + p2) / (p3 + p4) +
+  plot_annotation(
+    title   = "Urban Productivity Dashboard — Metro Manila",
+    subtitle = "FIES 2023 + CPH 2020 | City-level analysis (n = 17)",
+    caption  = "Sources: PSA FIES 2023, CPH 2020",
+    theme    = theme(plot.title = element_text(face = "bold", size = 13))
+  )
+```
+
+------------------------------------------------------------------------
+
+## 6 · Exercises
+
+::: callout-tip
+**Exercise 1 — Map a new variable**\
+Produce a choropleth map of `pct_makeshift_wall` (informality proxy).
+Which cities have the highest rates? Does this align with what you know
+about NCR urban geography?
+:::
+
+::: callout-tip
+**Exercise 2 — Test a different gradient**\
+Fit the log-linear gradient model using `pct_college_grad` as the
+dependent variable instead of `mean_rentval`. Is the human capital
+gradient steeper or flatter than the rent gradient?
+:::
+
+::: callout-tip
+**Exercise 3 — OFW and rent**\
+Plot `pct_ofw` (overseas workers) against `dist_cbd_km`. Do peripheral
+cities have more OFWs? What might this tell us about the relationship
+between local labour market opportunities and international migration?
+:::
+
+------------------------------------------------------------------------
+
+## 7 · Key Takeaways
+
+- **Spatial data in R** combines a geometry column with regular data
+  frame columns, enabling seamless joins between tabular and geographic
+  data
+- The **land rent gradient** in Metro Manila broadly follows the AMM
+  prediction: rent declines with distance from Makati CBD
+- **Human capital** (college graduation) and **rent** are positively
+  correlated across NCR cities, consistent with agglomeration theory
+- **Anomalies** (San Juan's high rent, Valenzuela's high rent burden)
+  are as instructive as the general pattern — they invite deeper
+  investigation
+
+------------------------------------------------------------------------
+
+## Session info
+
+```{r}
+#| label: session-info
+#| code-fold: true
+
+sessionInfo()
+```
