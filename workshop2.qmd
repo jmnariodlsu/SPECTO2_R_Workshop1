@@ -1,0 +1,902 @@
+---
+title: "Workshop 2: Spatial Econometrics & Road Networks"
+subtitle: "Does location matter? Spatial patterns, road access, and urban regression"
+author: "Jem Marie Nario"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    code-fold: true
+    code-tools: true
+    code-copy: true
+    highlight-style: github
+    fig-width: 8
+    fig-height: 5
+    fig-dpi: 150
+    embed-resources: true
+    smooth-scroll: true
+    css: styles.css
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+editor:
+  markdown:
+    wrap: 72
+---
+
+## Overview
+
+In Workshop 1, we mapped rent values and human capital across Metro
+Manila. We treated each city as an **independent** observation — as if
+Makati and Mandaluyong had nothing to do with each other.
+
+But cities are not islands. What happens in one city often spills over
+into its neighbours. **Spatial econometrics** gives us tools to detect
+and model these spillovers.
+
+By the end of this workshop, you will be able to:
+
+1.  Explain what spatial autocorrelation is and why it matters
+2.  Compute and interpret **Moran's I** — the standard test for spatial
+    autocorrelation
+3.  Download and visualise the **road network** of Metro Manila using
+    `osmdata` and `dodgr`
+4.  Measure how accessible each city is to the Makati CBD via roads
+5.  Run a **spatial lag model** and compare it to a standard OLS
+    regression
+
+::: callout-note
+**Packages used in this workshop**\
+`sf`, `spdep`, `spatialreg`, `osmdata`, `dodgr`, `ggplot2`, `dplyr`\
+All can be installed with `install.packages()` — see Section 1.
+:::
+
+------------------------------------------------------------------------
+
+## 1 · Setup
+
+### 1.1 Install and load packages
+
+```{r}
+#| label: setup
+
+# install.packages(c("spdep", "spatialreg", "osmextract", "dodgr",
+#                    "sf", "ggplot2", "dplyr", "ggrepel",
+#                    "scales", "viridis", "patchwork", "geodata"))
+
+library(tidyverse)
+library(sf)
+library(geodata)
+library(spdep)       # spatial weights and Moran's I
+library(spatialreg)  # spatial lag and error models
+library(osmextract)  # download OpenStreetMap data via Geofabrik
+library(dodgr)       # road network distances
+library(ggplot2)
+library(ggrepel)
+library(scales)
+library(viridis)
+library(patchwork)
+```
+
+### 1.2 Load the data from Workshop 1
+
+We reuse the same NCR city dataset and shapefile from Workshop 1.
+
+```{r}
+#| label: load-data
+
+load("data/ncr_city_training.RData")   # loads 'ncr_city'
+
+# Rebuild the shapefile and join — same steps as Workshop 1
+ph_adm2    <- gadm(country = "PHL", level = 2, path = "data/")
+ph_adm2_sf <- st_as_sf(ph_adm2)
+
+ncr_sf <- ph_adm2_sf %>%
+  filter(NAME_1 == "Metropolitan Manila") %>%
+  mutate(city = case_when(
+    NAME_2 == "Las Piñas"     ~ "Las Pinas",
+    NAME_2 == "Parañaque"     ~ "Paranaque",
+    NAME_2 == "Kalookan City" ~ "Caloocan",
+    NAME_2 == "Makati City"   ~ "Makati",
+    NAME_2 == "Pasay City"    ~ "Pasay",
+    NAME_2 == "Pasig City"    ~ "Pasig",
+    TRUE                      ~ NAME_2
+  ))
+
+ncr_map <- ncr_sf %>%
+  left_join(ncr_city, by = "city")
+
+ncr_centroids <- ncr_map %>%
+  st_centroid() %>%
+  mutate(
+    lon = st_coordinates(.)[, 1],
+    lat = st_coordinates(.)[, 2]
+  )
+
+cat("Cities loaded:", nrow(ncr_map), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 2 · What Is Spatial Autocorrelation?
+
+### 2.1 The core idea
+
+When we run a regression in standard economics, we assume our
+observations are **independent** of each other. This is often reasonable
+for households — but it is usually *wrong* for cities.
+
+Cities that are next to each other tend to be **similar**:
+
+- A high-rent city is usually surrounded by other high-rent cities
+- Workers commute across city borders, so wages spill over
+- Infrastructure (roads, trains) links nearby cities together
+
+This tendency for nearby places to look alike is called **spatial
+autocorrelation**. Ignoring it can bias our regression results.
+
+::: callout-note
+**Tobler's First Law of Geography**\
+*"Everything is related to everything else, but near things are more
+related than distant things."*\
+— Waldo Tobler (1970)
+
+This is the founding principle of spatial econometrics.
+:::
+
+### 2.2 Positive vs negative autocorrelation
+
+| Pattern | What it looks like | Metro Manila example |
+|------------------------|------------------------|------------------------|
+| **Positive** | High values cluster with high; low with low | High-rent cities (Makati, BGC area) cluster together |
+| **Negative** | High values border low values (checkerboard) | Rare in urban rent data |
+| **None (random)** | No spatial pattern | What standard OLS assumes |
+
+------------------------------------------------------------------------
+
+## 3 · Building a Spatial Weights Matrix
+
+To measure spatial relationships, we need to define which cities are
+**neighbours**. This is captured in a **spatial weights matrix** W.
+
+### 3.1 Queen contiguity
+
+The simplest rule: two cities are neighbours if they **share a border or
+a corner** (like a queen in chess).
+
+```{r}
+#| label: spatial-weights
+
+# Build queen contiguity neighbours
+ncr_nb <- poly2nb(ncr_map, queen = TRUE)
+
+# Convert to a weights list (row-standardised)
+# row-standardised means each row sums to 1
+ncr_w <- nb2listw(ncr_nb, style = "W")
+
+# Summary
+summary(ncr_nb)
+```
+
+```{r}
+#| label: plot-neighbours
+#| fig-cap: "Queen contiguity neighbours — NCR cities"
+
+# Extract centroid coordinates for plotting the neighbour links
+coords <- st_coordinates(st_centroid(ncr_map))
+
+plot(st_geometry(ncr_map), border = "grey60", col = "grey95",
+     main = "Spatial Neighbours (Queen Contiguity)")
+plot(ncr_nb, coords, add = TRUE, col = "#c0392b", lwd = 1.2)
+text(coords, labels = ncr_map$city, cex = 0.55, col = "grey20")
+```
+
+::: callout-tip
+**Reading the neighbour plot**\
+Each red line connects two cities that are treated as neighbours in our
+spatial model. Makati, which is centrally located and small, will have
+many neighbours. Peripheral cities like Las Pinas or Valenzuela will
+have fewer.
+:::
+
+------------------------------------------------------------------------
+
+## 4 · Moran's I — Testing for Spatial Autocorrelation
+
+**Moran's I** is the standard statistic for detecting spatial
+autocorrelation. Think of it as the spatial version of a correlation
+coefficient.
+
+| Moran's I value | Interpretation                               |
+|-----------------|----------------------------------------------|
+| Close to **+1** | Strong positive autocorrelation (clustering) |
+| Close to **0**  | No spatial pattern (random)                  |
+| Close to **−1** | Negative autocorrelation (checkerboard)      |
+
+### 4.1 Moran's I for rent
+
+```{r}
+#| label: morans-i-rent
+
+moran_rent <- moran.test(ncr_map$mean_rentval, ncr_w)
+moran_rent
+```
+
+```{r}
+#| label: moran-plot-rent
+#| fig-cap: "Moran scatterplot — mean rent value"
+
+# The Moran scatterplot shows spatially lagged rent (y) vs own rent (x)
+# A positive slope = positive spatial autocorrelation
+moran.plot(
+  as.vector(scale(ncr_map$mean_rentval)),
+  ncr_w,
+  labels  = ncr_map$city,
+  xlab    = "Rent (standardised)",
+  ylab    = "Spatially lagged rent (neighbours' average)",
+  main    = "Moran Scatterplot — Rent Value"
+)
+```
+
+```{r}
+# Identify the LH quadrant cities (potential gentrification pressure)
+z <- as.vector(scale(ncr_map$mean_rentval))
+lag_z <- lag.listw(ncr_w, z)
+
+ncr_map %>%
+  st_drop_geometry() %>%
+  mutate(z = z, lag_z = lag_z) %>%
+  filter(z < 0, lag_z > 0) %>%
+  select(city, mean_rentval, z, lag_z) %>%
+  arrange(desc(lag_z))
+```
+
+::: callout-important
+**Interpreting the Moran scatterplot**\
+The x-axis is each city's own standardised rent. The y-axis is the
+*average rent of its neighbours*. A positive slope confirms that
+high-rent cities tend to be surrounded by other high-rent cities.
+
+The four quadrants tell you:
+
+- **Top-right (HH):** high rent, high-rent neighbours → hot spots
+- **Bottom-left (LL):** low rent, low-rent neighbours → cold spots
+- **Top-left (LH):** low rent but high-rent neighbours → potential
+  gentrification pressure
+- **Bottom-right (HL):** high rent but low-rent neighbours → isolated
+  islands
+:::
+
+In our NCR data, **Makati and San Juan** fall in the HL quadrant —
+they have the highest own rent but their neighbours' average is near
+zero, making them isolated high-rent islands rather than centres of a
+broader high-rent cluster. The LH quadrant is more policy-relevant:
+**Pateros, Pasay, Manila, Taguig, and Quezon City** all have
+below-average rent yet sit next to relatively expensive neighbours.
+These cities face the classic gentrification pressure — rising land
+values spilling in from adjacent areas without a corresponding rise in
+local incomes.
+
+
+### 4.2 Moran's I for college graduation
+
+```{r}
+#| label: morans-i-college
+
+moran_college <- moran.test(ncr_map$pct_college_grad, ncr_w)
+moran_college
+```
+
+```{r}
+#| label: moran-plot-college
+#| fig-cap: "Moran scatterplot — college graduation rate"
+
+moran.plot(
+  as.vector(scale(ncr_map$pct_college_grad)),
+  ncr_w,
+  labels = ncr_map$city,
+  xlab   = "College grads % (standardised)",
+  ylab   = "Spatially lagged college grads (neighbours' average)",
+  main   = "Moran Scatterplot — College Graduation Rate"
+)
+```
+```{r}
+#| label: college-quadrants
+
+z_col   <- as.vector(scale(ncr_map$pct_college_grad))
+lag_col <- lag.listw(ncr_w, z_col)
+
+ncr_map %>%
+  st_drop_geometry() %>%
+  mutate(z = z_col, lag_z = lag_col) %>%
+  filter(z < 0, lag_z > 0) %>%
+  select(city, pct_college_grad, z, lag_z) %>%
+  arrange(desc(lag_z))
+```
+
+::: callout-important
+**Interpreting the Moran scatterplot**\
+The x-axis is each city's own standardised college graduation rate.
+The y-axis is the *average graduation rate of its neighbours*. A
+positive slope confirms that high-education cities cluster together
+spatially.
+
+The four quadrants tell you:
+
+- **Top-right (HH):** high education, high-education neighbours → knowledge clusters
+- **Bottom-left (LL):** low education, low-education neighbours → persistent skills gaps
+- **Top-left (LH):** low education but high-education neighbours → spillover potential
+- **Bottom-right (HL):** high education but low-education neighbours → isolated skills hubs
+:::
+
+Only **Mandaluyong** falls in the LH quadrant — it has a slightly
+below-average college graduation rate yet sits next to high-education
+neighbours (Makati, San Juan, Pasig). This makes it the most likely
+candidate for human capital spillovers: workers and firms in
+Mandaluyong benefit from proximity to a highly skilled labour pool
+without the city itself having produced those graduates locally.
+
+
+------------------------------------------------------------------------
+
+## 5 · Road Network Data with `osmdata`
+
+So far we have used straight-line distance from Makati CBD. But people
+do not travel in straight lines — they use roads. In this section, we
+download the actual Metro Manila road network from **OpenStreetMap
+(OSM)**.
+
+### 5.1 What is OpenStreetMap?
+
+OpenStreetMap (OSM) is a free, community-built map of the world —
+similar to Google Maps but open and downloadable. The `osmextract`
+package downloads pre-built OSM extracts from Geofabrik — a mirror
+that packages OSM data by country — directly into R as an `sf` object.
+This is faster and more reliable than querying the live Overpass API.
+
+### 5.2 Download the road network
+
+::: callout-warning
+**First run downloads ~30–80MB from Geofabrik.**
+This takes 1–2 minutes once, then saves to `data/roads_ncr.gpkg`.
+Every subsequent render reads from disk in under 5 seconds —
+no internet connection required after that.
+:::
+
+
+```{r}
+#| label: download-osm-roads
+#| cache: true
+
+if (!file.exists("data/roads_ncr.gpkg")) {
+  ph_roads <- oe_get(
+    "Philippines",
+    layer              = "lines",
+    query              = "SELECT * FROM lines WHERE highway IN
+                         ('motorway','trunk','primary','secondary','tertiary')",
+    download_directory = "data/"
+  )
+
+  bbox_ncr <- st_bbox(
+    c(xmin = 120.92, ymin = 14.38, xmax = 121.10, ymax = 14.76),
+    crs = st_crs(4326)
+  ) %>% st_as_sfc()
+
+  roads <- ph_roads[st_intersects(ph_roads, bbox_ncr, sparse = FALSE), ]
+  st_write(roads, "data/roads_ncr.gpkg", delete_dsn = TRUE)
+} else {
+  roads <- st_read("data/roads_ncr.gpkg")
+}
+
+cat("Road segments loaded:", nrow(roads), "\n")
+```
+
+### 5.3 Visualise the road network
+
+```{r}
+#| label: plot-roads
+#| fig-cap: "Metro Manila road network by road type (OSM)"
+
+# Classify road type for styling
+roads <- roads %>%
+  mutate(road_class = case_when(
+    highway %in% c("motorway", "trunk") ~ "Expressway / Trunk",
+    highway == "primary"                ~ "Primary",
+    highway == "secondary"              ~ "Secondary",
+    highway == "tertiary"               ~ "Tertiary",
+    TRUE                                ~ "Other"
+  ))
+
+ggplot() +
+  geom_sf(data = ncr_map, fill = "#f5f5f0", color = "white",
+          linewidth = 0.6) +
+  geom_sf(data = filter(roads, road_class == "Other"),
+          color = "#cccccc", linewidth = 0.15, alpha = 0.6) +
+  geom_sf(data = filter(roads, road_class == "Tertiary"),
+          color = "#aaaaaa", linewidth = 0.25) +
+  geom_sf(data = filter(roads, road_class == "Secondary"),
+          color = "#888888", linewidth = 0.4) +
+  geom_sf(data = filter(roads, road_class == "Primary"),
+          color = "#c0392b", linewidth = 0.65) +
+  geom_sf(data = filter(roads, road_class == "Expressway / Trunk"),
+          color = "#e67e22", linewidth = 0.9) +
+  labs(
+    title   = "Metro Manila Road Network",
+    subtitle = "Orange = expressway/trunk · Red = primary · Grey = secondary/tertiary",
+    caption = "Source: © OpenStreetMap contributors"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold", hjust = 0.5,
+                                 margin = margin(b = 4)),
+    plot.subtitle = element_text(hjust = 0.5, color = "grey40", size = 9),
+    plot.caption  = element_text(color = "grey60", size = 7, hjust = 0.5)
+  )
+```
+
+------------------------------------------------------------------------
+
+## 6 · Road Network Accessibility with `dodgr`
+
+Straight-line distance from Makati CBD (our `dist_cbd_km` variable)
+ignores road layout. A city 5 km away by air may be 12 km by road if
+there is a river or a wall in between.
+
+`dodgr` (**D**istances **O**n **D**irected **G**raphs in **R**) computes
+actual travel distances along a road network.
+
+### 6.1 Build the road graph
+
+```{r}
+#| label: build-road-graph
+
+# dodgr needs OSM data as a data frame — weight_streetnet() converts it
+road_graph <- weight_streetnet(
+  roads,
+  wt_profile = "motorcar"   # weight by car travel time
+)
+
+cat("Road graph edges:", nrow(road_graph), "\n")
+```
+
+### 6.2 Define origin and destination points
+
+```{r}
+#| label: od-points
+
+# Origin: each city centroid
+origins <- ncr_centroids %>%
+  st_transform(4326) %>%             # ensure WGS84
+  select(city, lon, lat) %>%
+  st_drop_geometry()
+
+# Destination: Makati CBD (Ayala Avenue area)
+makati_cbd <- data.frame(
+  lon = 121.0244,
+  lat = 14.5547
+)
+```
+
+### 6.3 Compute road distances
+
+```{r}
+#| label: road-distances
+#| cache: true
+
+# dodgr_dists() returns a matrix of distances in metres
+# from each origin to each destination
+dist_matrix <- dodgr_dists(
+  graph = road_graph,
+  from  = as.matrix(origins[, c("lon", "lat")]),
+  to    = as.matrix(makati_cbd)
+)
+
+# Attach road distance (km) back to city data
+origins$road_dist_km <- as.numeric(dist_matrix) / 1000
+
+ncr_city <- ncr_city %>%
+  left_join(select(origins, city, road_dist_km), by = "city")
+
+cat("Road distances computed. Preview:\n")
+origins %>%
+  arrange(road_dist_km) %>%
+  select(city, road_dist_km) %>%
+  print()
+```
+
+### 6.4 Compare road vs straight-line distance
+
+```{r}
+#| label: road-vs-straight
+#| fig-cap: "Road distance vs straight-line distance to Makati CBD"
+
+# Remove road_dist_km if it already exists to avoid duplicate columns
+ncr_city <- ncr_city %>% select(-any_of("road_dist_km"))
+
+ncr_city <- ncr_city %>%
+  left_join(select(origins, city, road_dist_km), by = "city")
+
+ggplot(ncr_city, aes(x = dist_cbd_km, y = road_dist_km)) +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", color = "grey60") +
+  geom_point(color = "#2c3e50", size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = city), size = 3.2, color = "grey30",
+                  max.overlaps = 20) +
+  labs(
+    title    = "Road Distance vs Straight-Line Distance",
+    subtitle = "Points above the dashed line take longer by road than by air",
+    x        = "Straight-line distance (km)",
+    y        = "Road network distance (km)",
+    caption  = "Sources: GADM, OSM via dodgr"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+::: callout-tip
+**Reading this chart**\
+The dashed line is the 45° line — it shows where road distance equals
+straight-line distance. Every city falls *above* this line (roads are
+always longer than the crow flies). Cities furthest above the line have
+the worst road connectivity relative to their geographic position.
+:::
+
+The most striking outlier is **Caloocan** — it sits about 11 km from
+Makati by air but requires over 23 km by road, the largest gap in NCR.
+This reflects the barrier effect of Quezon City's layout and the lack
+of direct north-south expressways through the inner city. **Valenzuela
+and Muntinlupa** also show large gaps, both being peripheral cities
+where the road network routes traffic around rather than through the
+urban core. At the other end, **Mandaluyong and San Juan** sit close to
+the 45° line — their road distance is nearly equal to straight-line
+distance, meaning they are exceptionally well-connected relative to
+their position. This plot is a simple but powerful illustration of why
+straight-line distance is a poor proxy for market access in a city
+shaped by rivers, rail lines, and unplanned road layouts.
+
+
+### 6.5 Map road accessibility
+
+```{r}
+#| label: map-accessibility
+#| fig-cap: "Road network distance to Makati CBD (km) — NCR cities"
+
+ncr_map <- ncr_map %>%
+  left_join(select(ncr_city, city, road_dist_km), by = "city")
+
+ncr_centroids <- ncr_centroids %>%
+  left_join(select(ncr_city, city, road_dist_km), by = "city")
+
+ggplot(ncr_map) +
+  geom_sf(aes(fill = road_dist_km), color = "white", linewidth = 0.8) +
+  geom_text_repel(
+    data          = ncr_centroids,
+    aes(x = lon, y = lat, label = city),
+    size          = 3,
+    color         = "grey20",
+    max.overlaps  = 20,
+    segment.size  = 0.3,
+    segment.color = "grey60"
+  ) +
+  scale_fill_distiller(
+    palette   = "RdYlGn",
+    direction = -1,
+    name      = "Road dist\nto CBD (km)"
+  ) +
+  labs(
+    title   = "Road Accessibility to Makati CBD",
+    subtitle = "Darker green = closer by road · Darker red = further by road",
+    caption  = "Source: OSM via dodgr + GADM"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold", hjust = 0.5,
+                                 margin = margin(b = 4)),
+    plot.subtitle = element_text(hjust = 0.5, color = "grey40", size = 9),
+    plot.caption  = element_text(color = "grey60", size = 7, hjust = 0.5),
+    legend.position = "right"
+  )
+```
+
+------------------------------------------------------------------------
+
+## 7 · Spatial Regression Models
+
+We now have three things:
+
+1.  **An outcome** — mean rent value (`mean_rentval`)
+2.  **An explanatory variable** — road distance to CBD (`road_dist_km`)
+3.  **A spatial weights matrix** — who is neighbours with whom (`ncr_w`)
+
+Let's put these together and see whether spatial spillovers matter.
+
+### 7.1 Step 1 — Baseline OLS
+
+Start with a standard regression, ignoring spatial structure:
+
+```{r}
+#| label: ols-model
+
+ols <- lm(log(mean_rentval) ~ road_dist_km + pct_college_grad,
+          data = ncr_map)
+summary(ols)
+```
+
+::: callout-note
+**Why log(rent)?**\
+Taking the log of rent makes the model multiplicative: a 1 km increase
+in road distance changes rent by a *percentage* rather than a fixed peso
+amount. This is the standard approach in urban economics (the
+Alonso–Muth–Mills gradient).
+:::
+
+### 7.2 Step 2 — Test residuals for spatial autocorrelation
+
+After running OLS, we test whether the *errors* are spatially
+correlated. If they are, OLS gives us biased standard errors.
+
+```{r}
+#| label: residual-moran
+
+# Moran's I on OLS residuals
+moran_resid <- lm.morantest(ols, ncr_w)
+moran_resid
+```
+
+::: callout-important
+**Decision rule**\
+If the p-value from `lm.morantest()` is below 0.05, the OLS residuals
+are spatially autocorrelated → OLS is not appropriate → use a spatial
+model.
+:::
+
+The Moran's I on the OLS residuals is 0.104 with a p-value of 0.065.
+This is a borderline result — it does not clear the conventional 0.05
+threshold, so we cannot firmly reject the null of no spatial
+autocorrelation in the residuals. However, with only 17 observations
+(NCR cities), the test has very low statistical power, meaning genuine
+spatial structure can easily go undetected. The positive Moran's I
+value still suggests a tendency for residuals to cluster spatially, so
+it is worth proceeding with the spatial models as a robustness check
+rather than treating OLS as definitively adequate.
+
+
+### 7.3 Step 3 — Lagrange Multiplier tests
+
+Before choosing between a spatial lag or spatial error model, run the
+**LM tests**. They tell you which specification fits better.
+
+```{r}
+#| label: lm-tests
+
+lm_tests <- lm.RStests(ols, ncr_w, test = "all")
+summary(lm_tests)
+```
+
+| Test | Significant? | Suggests |
+|------------------------|------------------------|------------------------|
+| **RSlag** | Yes | Spatial lag model (neighbours' rent affects own rent) |
+| **RSerr** | Yes | Spatial error model (unobserved factors cluster spatially) |
+| **adjRSlag** | Yes, adjRSerr No | Prefer spatial lag |
+| **adjRSerr** | Yes, adjRSlag No | Prefer spatial error |
+
+None of the tests are statistically significant — all p-values are well
+above 0.05. This is consistent with the borderline residual Moran's I
+result: with only 17 cities, the data do not provide strong enough
+evidence to formally prefer either a spatial lag or spatial error
+specification over OLS. We proceed with both spatial models as
+robustness checks rather than as corrections to a confirmed misspecification.
+In practice, this is a common situation in city-level analysis with small
+n — the spatial models are still worth estimating and comparing via AIC,
+but the results should be interpreted cautiously.
+
+### 7.4 Step 4 — Spatial lag model
+
+The **spatial lag model** adds the *average rent of neighbouring cities*
+as an explanatory variable:
+
+$$\ln(\text{rent}_i) = \alpha + \rho \sum_j w_{ij} \ln(\text{rent}_j) + \beta_1 \cdot \text{road\_dist}_i + \beta_2 \cdot \text{college}_i + \varepsilon_i$$
+
+The new term $\rho \sum_j w_{ij} \ln(\text{rent}_j)$ is the **spatial
+lag** — it captures how much of city *i*'s rent is explained by its
+neighbours' rents.
+
+```{r}
+#| label: spatial-lag-model
+
+slag <- lagsarlm(
+  log(mean_rentval) ~ road_dist_km + pct_college_grad,
+  data   = ncr_map,
+  listw  = ncr_w
+)
+summary(slag)
+```
+
+The spatial lag model gives three key results. First, **rho (ρ) = −0.04**
+with a p-value of 0.89 — the spatial lag term is essentially zero and
+far from significant. Neighbours' rent does not predict own rent once
+road distance and college graduation are controlled for. Second,
+**college graduation remains significant** (p = 0.029): a one percentage
+point increase in college graduates is associated with roughly 8.6%
+higher rent. Third, **road distance is not significant** (p = 0.21),
+though the negative sign is in the expected direction.
+
+Crucially, the **AIC of the spatial lag model (6.73) is higher than OLS
+(4.75)** — adding the spatial lag term made the model fit *worse*, not
+better. This is consistent with the insignificant LM tests: there is no
+meaningful spatial lag structure in this data at the city level.
+
+### 7.5 Step 5 — Spatial error model
+
+As an alternative, the **spatial error model** allows unobserved factors
+(e.g. shared infrastructure, regional policy) to cluster spatially:
+
+$$\ln(\text{rent}_i) = \alpha + \beta_1 \cdot \text{road\_dist}_i + \beta_2 \cdot \text{college}_i + u_i$$
+$$u_i = \lambda \sum_j w_{ij} u_j + \varepsilon_i$$
+
+```{r}
+#| label: spatial-error-model
+
+serr <- errorsarlm(
+  log(mean_rentval) ~ road_dist_km + pct_college_grad,
+  data  = ncr_map,
+  listw = ncr_w
+)
+summary(serr)
+```
+
+The spatial error model tells a similar story. **Lambda (λ) = 0.29**
+with a p-value of 0.31 — the spatial error term is positive (nearby
+cities share unobserved characteristics) but not statistically
+significant. **College graduation remains significant** (p = 0.018)
+with a slightly larger coefficient than in the lag model: a one
+percentage point increase in college graduates is associated with about
+8.9% higher rent. Road distance again falls short of significance
+(p = 0.20).
+
+The **AIC of the spatial error model (6.21) is also higher than OLS
+(4.75)**, confirming that adding spatial structure does not improve fit.
+
+
+### 7.6 Compare models
+
+```{r}
+#| label: model-comparison
+
+# AIC comparison — lower AIC = better fit
+tibble(
+  Model = c("OLS", "Spatial Lag", "Spatial Error"),
+  AIC   = c(AIC(ols), AIC(slag), AIC(serr)),
+  `Spatial ρ or λ` = c(NA,
+                        slag$rho,
+                        serr$lambda)
+) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Model fit comparison")
+```
+
+::: callout-note
+**Choosing a model**\
+Pick the spatial model with the lower AIC. If both spatial models have
+substantially lower AIC than OLS, spatial structure matters. The
+coefficient on `road_dist_km` should be interpreted as the *direct*
+effect of road access on rent, holding neighbours' rents constant.
+:::
+
+OLS has the lowest AIC of the three models, confirming that spatial
+dependence does not meaningfully improve fit for this dataset. The
+spatial lag's **ρ = −0.04** is negligible — neighbours' rent adds
+nothing once the covariates are controlled for. The spatial error's
+**λ = 0.29** is larger and positive, hinting that unobserved factors
+(shared infrastructure, policy environment) do cluster spatially across
+NCR cities, but not strongly enough to justify the additional parameter
+given only 17 observations.
+
+------------------------------------------------------------------------
+
+## 8 · Mapping Residuals
+
+Even after adding spatial terms, it is good practice to map the
+residuals. Persistent spatial clusters in the residuals suggest we are
+still missing an important variable.
+
+```{r}
+#| label: map-residuals
+#| fig-cap: "OLS vs spatial lag model residuals — NCR cities"
+
+ncr_map <- ncr_map %>%
+  mutate(
+    resid_ols  = residuals(ols),
+    resid_slag = residuals(slag)
+  )
+
+p_ols_resid <- ggplot(ncr_map) +
+  geom_sf(aes(fill = resid_ols), color = "white", linewidth = 0.8) +
+  scale_fill_distiller(palette = "RdBu", direction = 1,
+                       name = "Residual") +
+  labs(title = "OLS residuals") +
+  theme_void(base_size = 10) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+p_slag_resid <- ggplot(ncr_map) +
+  geom_sf(aes(fill = resid_slag), color = "white", linewidth = 0.8) +
+  scale_fill_distiller(palette = "RdBu", direction = 1,
+                       name = "Residual") +
+  labs(title = "Spatial lag residuals") +
+  theme_void(base_size = 10) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+p_ols_resid + p_slag_resid +
+  plot_annotation(
+    title   = "Residual Maps — Do spatial clusters remain?",
+    subtitle = "Blue = over-predicted · Red = under-predicted",
+    theme   = theme(plot.title = element_text(face = "bold", size = 12))
+  )
+```
+
+::: callout-tip
+**What to look for**\
+If the OLS residual map shows obvious colour clusters (e.g. all southern
+cities are red), the spatial lag model should reduce that clustering. If
+the spatial lag map looks more random (no clear pattern), the model has
+successfully absorbed the spatial spillovers.
+:::
+
+The two residual maps are almost indistinguishable — the spatial lag
+model has not meaningfully redistributed the prediction errors. The
+dominant pattern in both maps is a **north-south divide**: southern
+cities (Muntinlupa, Parañaque) are consistently under-predicted (blue —
+model thinks rent should be lower than it is), while several central
+cities are over-predicted (red — model overshoots actual rent). This
+persistent pattern suggests the missing variable is not a spatial
+spillover between neighbours but something structural about the
+**south corridor** — possibly the Alabang growth centre, proximity to
+SLEX, or the concentration of gated subdivisions that inflate rent
+independently of CBD distance or education levels.
+
+
+## 9 · Key Takeaways
+
+- **Spatial autocorrelation** means nearby cities are more similar than
+  distant ones — a fundamental feature of urban data that OLS ignores
+- **Moran's I** is the standard test: positive values confirm spatial
+  clustering; a p-value below 0.05 means the pattern is not random.
+  Rent and college graduation both show positive spatial autocorrelation
+  in NCR, but Makati and San Juan are isolated high-value outliers
+  rather than centres of a broader cluster
+- **osmextract** downloads pre-built OSM extracts from Geofabrik into R —
+  faster and more reliable than querying the live Overpass API directly
+- **dodgr** converts road networks into graphs so we can compute actual
+  travel distances — Caloocan has the largest gap between road and
+  straight-line distance, reflecting poor north-south connectivity
+- **Spatial lag and error models** are worth estimating even when LM
+  tests are inconclusive — with n = 17, low statistical power means
+  absence of significance is not absence of spatial structure
+- **AIC, not just p-values, guides model selection**: here OLS
+  outperformed both spatial models, validating the insignificant LM
+  tests and suggesting spillovers operate below the city level
+- **College graduation is the most robust predictor of rent** across all
+  three model specifications — consistent with agglomeration and human
+  capital externality theory
+- A spatially patterned residual does not always call for a spatial
+  model — sometimes it signals a missing variable, as with the
+  south corridor pattern driven by Alabang and SLEX proximity
+
+------------------------------------------------------------------------
+
+## Session info
+
+```{r}
+#| label: session-info
+#| code-fold: true
+
+sessionInfo()
+```

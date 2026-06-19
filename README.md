@@ -14,6 +14,7 @@ By the end of the three workshops, you will be able to:
 - Produce publication-quality choropleth maps of Philippine cities
 - Test the Alonso–Muth–Mills land rent gradient model with FIES data
 - Run basic spatial econometric models
+- Analyse road network accessibility using OpenStreetMap data
 - Visualize urban-regional economic networks
 
 ---
@@ -23,14 +24,14 @@ By the end of the three workshops, you will be able to:
 | # | Week | Topic | Status |
 |---|---|---|---|
 | 1 | Week 3 | Mapping Philippine Cities — land rent gradients and human capital | ✅ Available |
-| 2 | Week 7 | Spatial Econometrics and Road Networks | 🔜 Coming soon |
+| 2 | Week 7 | Spatial Econometrics and Road Networks | ✅ Available |
 | 3 | Week 10 | Urban-Regional Economic Networks | 🔜 Coming soon |
 
 Access the workshops at: **https://jmnariodlsu.github.io/SPECTO2_R_Workshop1/**
 
 ---
 
-## Workshop 1 — Mapping Philippine Cities
+## [Workshop 1 — Mapping Philippine Cities](https://jmnariodlsu.github.io/SPECTO2_R_Workshop1/workshop1.html)
 
 **Topics covered:**
 - Introduction to spatial data structures in R (`sf` package)
@@ -45,6 +46,30 @@ Access the workshops at: **https://jmnariodlsu.github.io/SPECTO2_R_Workshop1/**
 - Monocentric city model
 - Agglomeration economies
 - Human capital and urban productivity
+
+**Packages:** `sf` · `ggplot2` · `geodata` · `ggrepel` · `patchwork`
+
+---
+
+## [Workshop 2 — Spatial Econometrics & Road Networks](https://jmnariodlsu.github.io/SPECTO2_R_Workshop1/workshop2.html)
+
+**Topics covered:**
+- Spatial autocorrelation and Tobler's First Law of Geography
+- Building spatial weights matrices (queen contiguity)
+- Moran's I — detecting and visualising spatial clustering
+- Downloading the Metro Manila road network from OpenStreetMap via `osmextract`
+- Computing road network distances to the Makati CBD using `dodgr`
+- Spatial lag and spatial error regression models
+- AIC-based model comparison and residual diagnostics
+
+**Key concepts:**
+- Spatial autocorrelation
+- Moran's I
+- Spatial weights matrix
+- Road network accessibility
+- Spatial lag and error models
+
+**Packages:** `spdep` · `spatialreg` · `osmextract` · `dodgr` · `sf` · `ggplot2`
 
 ---
 
@@ -102,6 +127,7 @@ Before the workshops, make sure you have the following installed:
 
 **R packages** (run this once in R):
 ```r
+# Workshop 1
 install.packages(c(
   "sf",          # spatial data
   "ggplot2",     # plotting
@@ -110,7 +136,15 @@ install.packages(c(
   "scales",      # axis formatting
   "patchwork",   # combining plots
   "geodata",     # GADM shapefiles
-  "tmap"         # thematic maps (optional)
+  "viridis"      # colour scales
+))
+
+# Workshop 2 (additional)
+install.packages(c(
+  "spdep",       # spatial weights and Moran's I
+  "spatialreg",  # spatial lag and error models
+  "osmextract",  # OpenStreetMap data via Geofabrik
+  "dodgr"        # road network distances
 ))
 ```
 
@@ -123,10 +157,12 @@ Go to **https://jmnariodlsu.github.io/SPECTO2_R_Workshop1/** and click on the wo
 
 ### Option 2 — Run the code yourself
 1. Download `data/ncr_city_training.RData` and `data/ncr_city_training.csv`
-2. Download `workshop1.qmd`
+2. Download the relevant `.qmd` file (`workshop1.qmd` or `workshop2.qmd`)
 3. Open RStudio → create a new project in the folder where you saved the files
 4. Make sure the `data/` folder is in the same directory as the `.qmd`
-5. Open `workshop1.qmd` and click **Render**, or run code chunks interactively
+5. Open the `.qmd` file and click **Render**, or run code chunks interactively
+
+> **Note for Workshop 2:** The road network download (`osmextract`) will fetch a ~30–80MB file from Geofabrik on first run and save it to `data/roads_ncr.gpkg`. Subsequent renders read from disk and take only a few seconds.
 
 ### Option 3 — Clone the full repository
 ```r
@@ -143,6 +179,8 @@ Then open `SPECTO2_R_Workshop1.Rproj` in RStudio.
 - Mills, E. S. (1967). An aggregative model of resource allocation in a metropolitan area. *American Economic Review*, 57(2), 197–210.
 - Muth, R. F. (1969). *Cities and Housing*. University of Chicago Press.
 - Glaeser, E. L., Scheinkman, J., & Shleifer, A. (1995). Economic growth in a cross-section of cities. *Journal of Monetary Economics*, 36(1), 117–143.
+- Moretti, E. (2004). Human capital externalities in cities. In Henderson, J. V. & Thisse, J. F. (Eds.), *Handbook of Regional and Urban Economics*, Vol. 4. Elsevier.
+- Tobler, W. (1970). A computer movie simulating urban growth in the Detroit region. *Economic Geography*, 46(sup1), 234–240.
 - Philippine Statistics Authority (PSA). (2023). *Family Income and Expenditure Survey 2023*. PSA.
 - Philippine Statistics Authority (PSA). (2020). *Census of Population and Housing 2020*. PSA.
 
@@ -153,6 +191,7 @@ Then open `SPECTO2_R_Workshop1.Rproj` in RStudio.
 - **FIES 2023** — [PSA Data Archive](https://psada.psa.gov.ph/catalog/FIES)
 - **CPH 2020** — [PSA Data Archive](https://psada.psa.gov.ph/catalog/CPH)
 - **GADM Shapefiles** — [gadm.org](https://gadm.org)
+- **OpenStreetMap** — [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright), via [Geofabrik](https://download.geofabrik.de/)
 
 *Proper attribution to PSA should be made in any report or output using this data.*
 
