@@ -4,4 +4,6 @@
 .Ruserdata
 data/roads_ncr.gpkg
 data/*.pbf
-data/*.osm.pbf
+data/*.osm.pbf"data/gadm/"
+"data/geofabrik_philippines-latest.gpkg"
+"data/roads_ncr.gpkg"
