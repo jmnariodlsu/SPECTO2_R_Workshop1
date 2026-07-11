@@ -1,0 +1,645 @@
+---
+title: "Workshop 3: Urban-Regional Economic Networks"
+subtitle: "Nodes, edges, and lagging regions — network analysis of the Philippine urban system"
+author: "Jem Marie Nario"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    code-fold: true
+    code-tools: true
+    code-copy: true
+    highlight-style: github
+    fig-width: 8
+    fig-height: 5
+    fig-dpi: 150
+    embed-resources: true
+    smooth-scroll: true
+    css: styles.css
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+editor:
+  markdown:
+    wrap: 72
+---
+
+## Overview
+
+In Workshop 1 we mapped cities as points on a surface. In Workshop 2 we
+let cities *talk to their neighbours* through a contiguity matrix — but
+only their immediate, physically-touching neighbours. Real regional
+economies don't work that way. Davao trades with Manila despite sharing
+no border. A migrant from Eastern Visayas moves straight to the NCR
+labour market, skipping every region in between. Money, workers, and
+goods move along a **network** of interregional linkages — not just
+across a shared boundary.
+
+This workshop moves from *spatial weights* (who is next to whom) to
+**networks** (who is connected to whom, and how strongly). We treat each
+of the Philippines' 17 administrative regions as a **node**, and
+interregional flows — trade, migration, capital — as **weighted,
+directed edges**.
+
+By the end of this workshop, you will be able to:
+
+1.  Explain the difference between a spatial weights matrix and a
+    network, and when each is the right tool
+2.  Build a node/edge dataset for the 17 Philippine regions and
+    represent it as a graph using `igraph` and `tidygraph`
+3.  Compute and interpret **degree/strength**, **betweenness**, and
+    **eigenvector centrality** — and understand why they can disagree
+4.  Visualise the regional network with `ggraph` using a real geographic
+    layout
+5.  Detect **community structure** (regional economic blocs) and
+    identify **lagging nodes** — regions that are peripheral in the
+    network relative to their economic size
+6.  Build a simple **input-output style multiplier** from interregional
+    flows and use it alongside centrality to triangulate which regions
+    are genuinely disconnected versus simply small
+
+::: callout-note
+**Packages used in this workshop**\
+`igraph`, `tidygraph`, `ggraph`, `sf`, `geodata`, `geosphere`, `dplyr`,
+`ggplot2`, `ggrepel`, `viridis`, `scales`\
+All can be installed with `install.packages()` — see Section 1.
+:::
+
+::: callout-important
+**About the data in this workshop**\
+There is no single public "interregional trade flow matrix" for the
+Philippines the way there is a census file or a shapefile. Real analysis
+would draw on sources like the PSA Regional Accounts, LFS
+migration/commuting tables, or a commissioned Commodity Flow Survey. For
+teaching purposes, this workshop builds a **gravity-model synthetic
+network** calibrated to real PSA population (2020 CPH) and GRDP share
+(PSA Regional Accounts) figures. The method generalises directly — swap
+the constructed edge list in Section 3 for a real OD
+(origin-destination) matrix and everything downstream runs unchanged.
+:::
+
+------------------------------------------------------------------------
+
+## 1 · Setup
+
+### 1.1 Install and load packages
+
+```{r}
+#| label: setup
+
+# install.packages(c("igraph", "tidygraph", "ggraph", "sf", "geodata",
+#                    "geosphere", "dplyr", "ggplot2", "ggrepel",
+#                    "viridis", "scales", "tibble"))
+
+library(tidyverse)
+library(sf)
+library(geodata)
+library(geosphere)   # great-circle distances
+library(igraph)
+library(tidygraph)   # tidy wrappers around igraph
+library(ggraph)      # ggplot2-style network plotting
+library(ggrepel)
+library(viridis)
+library(scales)
+```
+
+::: callout-tip
+**`igraph` vs `tidygraph`**\
+`igraph` is the underlying engine — fast, mature, and where the
+algorithms (centrality, community detection, shortest paths) actually
+live. `tidygraph` wraps an `igraph` object in two tidy tibbles (one for
+nodes, one for edges) so you can `mutate()`, `filter()`, and `%>%` your
+way through network construction the same way you would a data frame.
+`ggraph` then plots whichever of the two (nodes or edges) is "active".
+Nothing here requires choosing one over the other — we move fluidly
+between `igraph` functions and `tidygraph` verbs, which is the normal
+way this ecosystem is used.
+:::
+
+------------------------------------------------------------------------
+
+## 2 · Node Data — The 17 Regions
+
+### 2.1 Build the region table
+
+Each node needs three things: an identifier, a location (for plotting on
+a real map), and an economic "mass" (for the gravity model in Section
+3).
+
+```{r}
+#| label: node-data
+
+regions <- tribble(
+  ~code,      ~name,                                ~lat,     ~lon,      ~pop_2020,   ~grdp_share,
+  "NCR",      "National Capital Region",             14.5995,  120.9842,  13484462,    33.9,
+  "CAR",      "Cordillera Administrative Region",     16.4023,  120.5960,   1797660,     2.1,
+  "R1",       "Ilocos Region",                        16.6159,  120.3209,   5301139,     2.6,
+  "R2",       "Cagayan Valley",                       17.6132,  121.7270,   3685744,     1.9,
+  "R3",       "Central Luzon",                        15.0286,  120.6898,  12422172,    11.3,
+  "R4A",      "CALABARZON",                           14.2117,  121.1653,  16195042,    15.4,
+  "MIMAROPA", "MIMAROPA",                             13.4115,  121.1803,   3228558,     1.3,
+  "R5",       "Bicol Region",                         13.1391,  123.7438,   6082165,     2.8,
+  "R6",       "Western Visayas",                      10.7202,  122.5621,   7954723,     5.1,
+  "R7",       "Central Visayas",                      10.3157,  123.8854,   8081988,     7.2,
+  "R8",       "Eastern Visayas",                      11.2543,  125.0000,   4547150,     1.9,
+  "R9",       "Zamboanga Peninsula",                   6.9214,  122.0790,   3875576,     1.7,
+  "R10",      "Northern Mindanao",                     8.4542,  124.6319,   5022768,     3.1,
+  "R11",      "Davao Region",                          7.1907,  125.4553,   5243536,     4.6,
+  "R12",      "SOCCSKSARGEN",                          6.5000,  124.8500,   4901486,     2.4,
+  "R13",      "Caraga",                                8.9475,  125.5406,   2804788,     1.5,
+  "BARMM",    "Bangsamoro Autonomous Region",           7.2231,  124.2452,   4404288,     1.2
+)
+
+cat("Regions loaded:", nrow(regions), "\n")
+```
+
+::: callout-note
+**Data sources**\
+Population figures are from the 2020 Census of Population and Housing
+(PSA), rounded for illustration — consult PSA OpenStat for exact counts
+by region. GRDP shares are approximate, based on PSA Regional Accounts
+of the Philippines (recent years, constant 2018 prices), and rounded to
+one decimal. NCR, CALABARZON, and Central Luzon consistently account for
+over half of national output; this concentration is the single most
+important fact for interpreting everything that follows.
+:::
+
+### 2.2 Map the regions
+
+Before building a network, look at the raw geography — the same first
+step as Workshops 1 and 2.
+
+```{r}
+#| label: base-map
+
+ph_adm1 <- gadm(country = "PHL", level = 1, path = "data/")
+ph_adm1_sf <- st_as_sf(ph_adm1)
+
+region_pts <- st_as_sf(regions, coords = c("lon", "lat"), crs = 4326,
+                        remove = FALSE)
+
+ggplot() +
+  geom_sf(data = ph_adm1_sf, fill = "#f5f5f0", color = "grey80",
+          linewidth = 0.15) +
+  geom_sf(data = region_pts, aes(size = pop_2020, color = grdp_share)) +
+  scale_color_viridis(option = "magma", name = "GRDP\nshare (%)") +
+  scale_size(range = c(2, 10), name = "Population\n(2020)",
+             labels = label_number(scale = 1e-6, suffix = "M")) +
+  labs(
+    title    = "The 17 Regions as Network Nodes",
+    subtitle = "Bubble size = population · Colour = share of national GDP",
+    caption  = "Sources: PSA 2020 CPH; PSA Regional Accounts"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "grey40", size = 9),
+    plot.caption  = element_text(color = "grey60", size = 7, hjust = 0.5)
+  )
+```
+
+The economic geography is immediately visible: NCR is small in land area
+but dominant in colour (GRDP share) despite a bubble no bigger than
+several Mindanao regions in population. This mismatch between
+*population size* and *economic weight* is exactly what a network
+analysis can help unpack — is NCR's dominance purely about scale, or is
+it also about how connected it is to everything else?
+
+------------------------------------------------------------------------
+
+## 3 · Building the Edge List — A Gravity Model
+
+### 3.1 Why gravity?
+
+The **gravity model** is the workhorse of interregional flow modelling
+in economic geography, borrowed directly from Newtonian physics: flow
+between two places is proportional to the product of their "masses"
+(population, GDP) and inversely proportional to a power of the distance
+between them.
+
+$$F_{ij} = \frac{M_i \cdot M_j}{d_{ij}^{\beta}}$$
+
+Where $M_i$ is an economic mass index for region $i$, $d_{ij}$ is the
+great-circle distance between regional centroids, and $\beta$ controls
+how sharply flows decay with distance (we use $\beta = 1.5$, a standard
+middle-ground value in trade and migration gravity models).
+
+::: callout-warning
+**This is a stylised proxy, not measured trade data.** It encodes two
+real regularities — bigger economies transact more, and distance imposes
+real logistics cost in an archipelago — but it cannot capture things
+like inter-island shipping bottlenecks, existing trade agreements, or
+the pull of a specific port. Treat the resulting network as a teaching
+device that generates a *plausible* interregional topology, and replace
+it with actual OD data (trade, migration, or commuting flows) for
+research use.
+:::
+
+### 3.2 Compute pairwise distances and flows
+
+```{r}
+#| label: gravity-model
+
+n <- nrow(regions)
+
+# Great-circle distance matrix (km) between all region pairs
+dist_mat <- distm(
+  regions[, c("lon", "lat")],
+  fun = distHaversine
+) / 1000
+
+# Economic mass = GRDP share weighted by the square root of population
+# (a common gravity-model damping so NCR's population doesn't swamp everything)
+mass <- regions$grdp_share * sqrt(regions$pop_2020 / 1e6)
+
+flow_mat <- matrix(0, n, n)
+for (i in 1:n) {
+  for (j in 1:n) {
+    if (i != j) {
+      flow_mat[i, j] <- (mass[i] * mass[j]) / (dist_mat[i, j]^1.5)
+    }
+  }
+}
+
+# Rescale so total flow sums to a convenient 1000 "units"
+flow_mat <- flow_mat / sum(flow_mat) * 1000
+rownames(flow_mat) <- colnames(flow_mat) <- regions$code
+
+# Convert to a long edge list
+edges <- as_tibble(flow_mat, rownames = "from") %>%
+  pivot_longer(-from, names_to = "to", values_to = "weight") %>%
+  filter(weight > 0)
+
+cat("Edges built:", nrow(edges), "(fully connected, directed)\n")
+edges %>% arrange(desc(weight)) %>% head(10)
+```
+
+The heaviest edges should already look familiar: **NCR ↔ CALABARZON**
+and **NCR ↔ Central Luzon** dominate, simply because these three regions
+form a contiguous, short-distance, high-mass triangle — the Greater
+Capital Region in every sense but name.
+
+------------------------------------------------------------------------
+
+## 4 · From Edge List to Graph
+
+### 4.1 Build the `tbl_graph`
+
+```{r}
+#| label: build-graph
+
+nodes_tg <- regions %>% rename(region_name = name, name = code)
+
+net <- tbl_graph(
+  nodes    = nodes_tg,
+  edges    = edges %>% rename(from = from, to = to),
+  directed = TRUE,
+  node_key = "name"
+)
+
+net
+```
+
+::: callout-tip
+**Reading a `tbl_graph` printout**\
+The console output shows two stacked tibbles — a "Node Data" frame and
+an "Edge Data" frame — with the currently active one on top. Most
+`tidygraph` pipelines alternate `activate(nodes)` and `activate(edges)`
+before each `mutate()`, since centrality measures are node properties
+but flow weights are edge properties.
+:::
+
+------------------------------------------------------------------------
+
+## 5 · Centrality — Who Matters, and In What Sense?
+
+Centrality is not one number. Different centrality measures answer
+different questions, and a region can rank very differently depending on
+which one you ask.
+
+| Measure | Question it answers | Philippine intuition |
+|------------------------|------------------------|------------------------|
+| **Degree / strength** | How much total flow passes through this region? | Raw hub size — NCR's sheer volume of transactions |
+| **Betweenness** | How often does this region sit *on the path* between other region pairs? | Gateway role — a region other flows must pass through, even if its own volume is modest |
+| **Eigenvector** | Is this region connected to *other well-connected* regions? | Being plugged into the core, not just busy |
+
+### 5.1 Compute all three
+
+```{r}
+#| label: centrality
+
+net <- net %>%
+  activate(nodes) %>%
+  mutate(
+    strength_out = centrality_degree(weights = weight, mode = "out"),
+    strength_in  = centrality_degree(weights = weight, mode = "in"),
+    strength     = strength_out + strength_in,
+    betweenness  = centrality_betweenness(weights = 1 / weight, directed = TRUE),
+    eigen        = centrality_eigen(weights = weight, directed = FALSE)
+  )
+
+net %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  arrange(desc(strength)) %>%
+  select(name, grdp_share, strength, betweenness, eigen) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  print(n = 17)
+```
+
+::: callout-important
+**Interpreting the ranking**\
+On this gravity-model network, **NCR, CALABARZON, and Central Luzon**
+occupy the top three spots on every measure — no surprise, since gravity
+mechanically rewards being large *and* close to other large places. The
+more interesting result is **betweenness**: NCR carries a large
+betweenness score because so many shortest paths between Mindanao and
+Luzon regions route conceptually "through" it, but CALABARZON and
+Central Luzon — despite enormous *strength* — have betweenness near
+zero. They are massive hubs, but not bridges: removing them would not
+disconnect anyone else's shortest path, because they sit at the end of
+the network, not in the middle of it. **Davao Region** is the more
+interesting case: it ranks low on strength (its raw flow volume is
+modest relative to its GRDP) but registers a small, non-zero betweenness
+— a hint that it functions as a gateway for the wider Mindanao cluster
+even though it isn't itself a heavyweight hub. This is the kind of
+pattern that a single "biggest economy" ranking would never surface, and
+it is the core justification for running more than one centrality
+measure.
+:::
+
+------------------------------------------------------------------------
+
+## 6 · Visualising the Network Geographically
+
+The default `ggraph` layouts (force-directed, circular, tree) optimise
+for legibility, not truth — they will happily rearrange your regions
+into whatever shape minimises edge crossings. For a regional economy, we
+want nodes to sit at their *actual* geographic coordinates, so the
+picture reads as a map, not an abstract diagram.
+
+```{r}
+#| label: network-map
+#| fig-cap: "Interregional flow network — geographic layout"
+
+layout_geo <- create_layout(net, layout = "manual", x = regions$lon, y = regions$lat)
+
+ggraph(layout_geo) +
+  geom_sf(data = ph_adm1_sf, fill = "#f5f5f0", color = "grey85",
+          linewidth = 0.1, inherit.aes = FALSE) +
+  geom_edge_fan(
+    aes(edge_width = weight, edge_alpha = weight),
+    color = "#c0392b", strength = 0.3
+  ) +
+  scale_edge_width(range = c(0.05, 2.5), guide = "none") +
+  scale_edge_alpha(range = c(0.03, 0.6), guide = "none") +
+  geom_node_point(aes(size = strength, color = betweenness)) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 2.8,
+                  color = "grey20") +
+  scale_color_viridis(option = "plasma", name = "Betweenness") +
+  scale_size(range = c(2, 12), name = "Strength\n(total flow)") +
+  coord_sf(xlim = c(116, 127), ylim = c(4.5, 21)) +
+  labs(
+    title    = "Philippine Interregional Flow Network",
+    subtitle = "Edge width/opacity = flow intensity · Node size = strength · Colour = betweenness",
+    caption  = "Illustrative gravity-model network calibrated to PSA population and GRDP data"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "grey40", size = 9),
+    plot.caption  = element_text(color = "grey60", size = 7, hjust = 0.5),
+    legend.position = "right"
+  )
+```
+
+::: callout-tip
+**Reading this map**\
+The visual dominates around the NCR–CALABARZON–Central Luzon triangle by
+construction — nearly every edge in the network is densest there,
+because gravity concentrates flow wherever mass and proximity coincide.
+Look past that core: which regions have *any* visible red lines reaching
+toward them versus which ones look nearly isolated at this opacity
+scale? That visual isolation is the network's-eye view of what
+"peripheral" means, and it is worth comparing against the centrality
+table in Section 5 rather than trusting the picture alone — colour and
+opacity scales compress a wide range of values and can make small
+differences look like large ones.
+:::
+
+------------------------------------------------------------------------
+
+## 7 · Community Detection — Do Regional Blocs Exist?
+
+A natural question: does the network split into recognisable Luzon /
+Visayas / Mindanao blocs, or does something else emerge from the data?
+
+```{r}
+#| label: community-detection
+
+net_undir <- net %>%
+  activate(edges) %>%
+  mutate(weight_sym = weight) %>%
+  activate(nodes)
+
+comm <- net %>%
+  to_undirected() %>%
+  as.igraph() %>%
+  cluster_louvain(weights = E(.)$weight)
+
+net <- net %>%
+  activate(nodes) %>%
+  mutate(community = as.factor(comm$membership))
+
+net %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  count(community, sort = TRUE)
+
+net %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  arrange(community) %>%
+  select(name, community, grdp_share)
+```
+
+::: callout-important
+**A one-core, one-periphery result — and why that's informative**\
+Louvain community detection on this network typically returns **two**
+communities, not three: a tight **Luzon core** (NCR, CALABARZON, Central
+Luzon) and one large, loosely-connected **everything-else** bloc
+containing all fourteen remaining regions, Visayas and Mindanao alike.
+Modularity for this split is low (well under 0.1), meaning the network
+doesn't have strong natural clusters at all — it behaves more like a
+single dominant hub with a long tail than like several rival regional
+economies. This is itself a finding, not a null result: it is the
+network-analytic signature of what Philippine regional development
+literature has long called the "Imperial Manila" pattern — one
+mega-region plus periphery, rather than several competing growth poles.
+:::
+
+------------------------------------------------------------------------
+
+## 8 · A Simple Input-Output Style Multiplier
+
+Centrality tells you about network *position*. It says nothing about
+what happens to the rest of the economy when a region's output changes.
+For that, we borrow a genuinely input-output idea: the **Leontief
+inverse**.
+
+### 8.1 From flows to technical coefficients
+
+If $F_{ij}$ is the flow from region $i$ into region $j$'s intermediate
+purchases, and $X_j$ is region $j$'s total output, the **technical
+coefficient** $a_{ij} = F_{ij} / X_j$ is the peso of region $i$'s input
+needed per peso of region $j$'s output. Stack these into a matrix $A$,
+and the **Leontief inverse** $L = (I - A)^{-1}$ tells you the total
+(direct + indirect) output triggered everywhere in the system by one
+additional peso of final demand in region $j$ — the column sum of $L$ is
+region $j$'s **output multiplier**.
+
+```{r}
+#| label: leontief
+
+# Approximate each region's output in billion pesos from its GRDP share
+total_gdp_php_bn <- 23230   # approx. national GDP, billion pesos (recent year)
+output <- regions$grdp_share / 100 * total_gdp_php_bn
+
+# Scale the gravity flow matrix into peso-equivalent interregional
+# intermediate purchases, calibrated so average import intensity is
+# roughly 10% of output (an illustrative, not measured, assumption)
+scale_factor <- 0.10 * sum(output) / sum(flow_mat)
+flow_php <- flow_mat * scale_factor
+
+A <- matrix(0, n, n)
+for (j in 1:n) {
+  A[, j] <- flow_php[, j] / output[j]
+}
+
+L <- solve(diag(n) - A)
+output_multiplier <- colSums(L)
+names(output_multiplier) <- regions$code
+
+tibble(code = regions$code, name = regions$name,
+       grdp_share = regions$grdp_share,
+       multiplier = round(output_multiplier, 3)) %>%
+  arrange(desc(multiplier))
+```
+
+::: callout-important
+**Multipliers versus centrality — a genuinely different ranking**\
+The output multiplier ranking does **not** simply mirror the strength
+ranking from Section 5. **CALABARZON, Central Luzon, and NCR** again
+lead — their sheer volume of interregional purchases means a peso of new
+final demand there ripples outward the most — but the *gap* narrows
+sharply after the top three, and small, distant, low-strength regions
+(Zamboanga Peninsula, Caraga, SOCCSKSARGEN) cluster together with
+multipliers barely above 1.0: a peso spent there stays almost entirely
+local, triggering very little measurable knock-on activity elsewhere in
+the system. That is the input-output definition of economic isolation,
+and it is a different diagnosis from "isolated in the network" — a
+region can have decent betweenness (a gateway role, as with Davao) while
+still having a near-1.0 multiplier (weak knock-on economic linkage),
+because centrality measures topology while the multiplier measures the
+strength of monetary linkage along that topology.
+:::
+
+### 8.2 Triangulating "lagging" regions
+
+A region deserves the "lagging" label in a network sense not just for
+being small, but for being **more peripheral than its economic size
+would predict**. Compare rank on GRDP share against rank on strength and
+multiplier:
+
+```{r}
+#| label: lag-score
+
+lag_table <- net %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  left_join(
+    tibble(name = regions$code, multiplier = output_multiplier),
+    by = "name"
+  ) %>%
+  mutate(
+    grdp_rank       = rank(-grdp_share),
+    strength_rank    = rank(-strength),
+    multiplier_rank  = rank(-multiplier),
+    lag_score        = (strength_rank + multiplier_rank) - 2 * grdp_rank
+  ) %>%
+  select(name, grdp_share, grdp_rank, strength_rank, multiplier_rank, lag_score) %>%
+  arrange(desc(lag_score))
+
+print(lag_table, n = 17)
+```
+
+::: callout-tip
+**Reading the lag score**\
+A positive `lag_score` means a region ranks *worse* on network position
+than its GDP share alone would predict — it is more disconnected than it
+is small. In this illustrative network, **Davao Region, Northern
+Mindanao, and SOCCSKSARGEN** post the largest positive gaps: each has a
+respectable, non-trivial GRDP share, but distance from the Luzon core
+pulls their network position down disproportionately. A negative
+`lag_score` (as with **MIMAROPA** and **CAR**) means the region is
+*more* central than its small economy would suggest — worth a second
+look, since it may reflect genuine geographic proximity advantage
+(MIMAROPA sits just off CALABARZON) rather than an error. This is
+precisely the kind of region a purely economic ranking (GRDP alone) or a
+purely geographic one (distance from Manila alone) would misclassify —
+the value of the network approach is in the disagreement between the
+two.
+:::
+
+------------------------------------------------------------------------
+
+## 9 · Key Takeaways
+
+- **Networks generalise spatial weights.** Contiguity (Workshop 2) only
+  connects touching neighbours; a flow network connects any pair of
+  regions, weighted by how much actually moves between them — essential
+  once you're modelling trade or migration rather than pure physical
+  adjacency
+- **Centrality is plural, not singular.** Strength, betweenness, and
+  eigenvector centrality can and do disagree — CALABARZON and Central
+  Luzon are enormous hubs with near-zero betweenness, while Davao Region
+  shows the opposite pattern: modest strength but a genuine gateway
+  role. Always report more than one measure
+- **`tidygraph` + `ggraph`** let you build, mutate, and plot networks
+  with the same verbs used on ordinary data frames — `activate(nodes)` /
+  `activate(edges)` is the only new concept to learn
+- **A geographic (manual) layout** turns a network diagram into a map,
+  which is usually the right choice for regional economic networks where
+  physical distance is part of the story, not noise to be laid out away
+- **Community detection returned a core-periphery structure, not three
+  geographic blocs** — a single dominant Luzon core plus one
+  loosely-connected periphery, with low modularity throughout. That weak
+  clustering is itself evidence of a "primate region" economic geography
+  rather than several competing growth poles
+- **A Leontief-style multiplier adds a genuinely different lens**:
+  network position (topology) and economic linkage strength (flow
+  magnitude relative to output) can diverge, and triangulating both
+  against raw GRDP share is a more defensible way to flag "lagging"
+  regions than any single ranking alone
+- **All of this data is illustrative.** The gravity-model edge list is a
+  stand-in for real interregional trade, migration, or commuting OD
+  data. The workflow — build edges, construct the graph, compute
+  centrality, visualise geographically, detect communities, build a
+  multiplier — carries over unchanged once real flow data replaces the
+  synthetic matrix in Section 3
+
+------------------------------------------------------------------------
+
+## Session info
+
+```{r}
+#| label: session-info
+#| code-fold: true
+
+sessionInfo()
+```
